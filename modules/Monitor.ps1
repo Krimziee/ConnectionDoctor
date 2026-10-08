@@ -143,6 +143,8 @@ function Invoke-NetworkLoop {
     param($Shared)
     $tick = 0
     while (-not $Shared.Stop) {
+        # Paused (Pause button, or another tab in Krimz's Toolkit): nothing is read
+        if ($Shared.Paused) { Start-Sleep -Milliseconds 250; continue }
         try {
             if ($tick % 3 -eq 2) {
                 $now = Get-ConnectionInfo

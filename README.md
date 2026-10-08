@@ -10,6 +10,11 @@ No admin rights needed.
 
 Double-click **`Connection Doctor.cmd`**. The live monitor starts straight away.
 
+It's also a tab in **Krimz's Toolkit**. There, the live monitor only measures while its tab is selected:
+it starts the first time you open the tab, pauses when you switch to another tab, and resumes
+(with a fresh 30-second "Measuring...") when you come back. A test that's running carries on in the
+background, and the tab shows a small dot until it's done.
+
 ## What you see
 
 - **Verdict** at the top. The first one appears after 30 seconds, then it updates every 10 seconds.
@@ -57,6 +62,9 @@ modules\Network.ps1     reads adapter, router, DNS, Wi-Fi details
 modules\Monitor.ps1     background measuring threads
 modules\Judge.ps1       thresholds, verdict, events
 modules\Tests.ps1       the four test buttons
-modules\Ui.ps1          the window
-ui\MainWindow.xaml      window layout
+modules\Ui.ps1          the page and the window
+modules\Page.ps1        the Connection Doctor tab in Krimz's Toolkit
+ui\Page.xaml            page layout (shown by the window and the toolkit tab)
+ui\MainWindow.xaml      standalone window frame
+ui\Theme.xaml           shared look (same as the toolkit)
 ```

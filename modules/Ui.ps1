@@ -4,6 +4,9 @@
     (modules\Monitor.ps1) measure; a once-per-second timer here reads their
     results, updates the tiles, graph and event list, and every 10 seconds
     asks modules\Judge.ps1 for a verdict. Tests run on their own thread.
+    The page (ui\Page.xaml) is shown by the standalone window and by the
+    Connection Doctor tab in Krimz's Toolkit (modules\Page.ps1). In the toolkit
+    the monitor only measures while its tab is selected.
 #>
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -19,6 +22,9 @@ $script:State = @{
     Spans = New-Object System.Collections.Generic.List[object]
     LastEvent = @{}; RegionFails = @{}; RegionVia = @{}
     Verdict = $null; PendingVerdict = $null; LastWifi = $null; BaselineErrors = $null
+    UserPaused = $false   # the Pause button
+    TabAway = $false      # Krimz's Toolkit: another tab is selected
+    OnBusy = $null        # Krimz's Toolkit: shows the working dot while a test runs
 }
 
 # ------------------------------------------------------------------
@@ -508,6 +514,13 @@ function Start-Test {
         Job = Start-Background -Root $script:Root -Command $def.Command -Arguments $arguments
     }
     Add-Event 'info' "Started $($def.Name)."
+    Set-DoctorBusy $true
+}
+
+function Set-DoctorBusy {
+    # Tells Krimz's Toolkit (if the page is shown there) that a test is running
+    param([bool]$Busy)
+    if ($script:State.OnBusy) { try { & $script:State.OnBusy $Busy } catch { } }
 }
 
 function Update-Test {
@@ -533,6 +546,7 @@ function Update-Test {
     $script:Ui.ResultsPanel.Children.Insert(0, (New-ResultCard $result))
     $script:State.Test = $null
     Set-TestButtons $true
+    Set-DoctorBusy $false
     Add-Event $result.Level "$($result.Name): $($result.Verdict)"
 }
 
@@ -567,12 +581,14 @@ function New-ResultCard {
 }
 
 # ------------------------------------------------------------------
-#  Window
+#  Page, monitor and window
 # ------------------------------------------------------------------
 
 function Invoke-Tick {
     $script:State.Tick++
     Receive-Measurements
+    # Another tab is selected in Krimz's Toolkit: nothing is measured, only a running test is followed
+    if ($script:State.TabAway) { Update-Test; return }
     Update-Stats
     Update-Tiles
     Update-Header
@@ -582,7 +598,13 @@ function Invoke-Tick {
     Update-Test
 }
 
+function Update-Paused {
+    # The monitor measures unless the Pause button or another toolkit tab stops it
+    $script:Shared.Paused = $script:State.UserPaused -or $script:State.TabAway
+}
+
 function Stop-Everything {
+    if (-not $script:Shared) { return }   # the monitor never started
     $script:Shared.Stop = $true
     if ($script:Timer) { $script:Timer.Stop() }
     try { if ($script:Shared.TestProcess -and -not $script:Shared.TestProcess.HasExited) { $script:Shared.TestProcess.Kill() } } catch { }
@@ -590,23 +612,111 @@ function Stop-Everything {
     if ($script:State.Test) { Stop-Background $script:State.Test.Job }
 }
 
-function Show-DoctorWindow {
-    # -NoShow builds and starts everything without opening the window (used for automated checks)
-    param([string]$Root, [string]$Version, $Targets, [switch]$NoShow)
+function New-DoctorPage {
+    <#
+        Builds the page (ui\Page.xaml) and wires up its buttons. Used by the
+        standalone window below and by Krimz's Toolkit (modules\Page.ps1).
+        Nothing is measured until Start-Monitor.
+    #>
+    param([string]$Root, [string]$Version, $Targets, [scriptblock]$OnBusy)
 
     $script:Root = $Root
     $script:Targets = $Targets
     $script:Series = Get-SeriesList
+    $script:State.OnBusy = $OnBusy
+
+    [xml]$xaml = Get-Content (Join-Path $Root 'ui\Page.xaml') -Raw -Encoding UTF8
+    $page = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+    $script:Ui.Page = $page
+    $xaml.SelectNodes('//*[@*[local-name()="Name"]]') | ForEach-Object {
+        $name = $_.GetAttribute('Name', 'http://schemas.microsoft.com/winfx/2006/xaml')
+        if ($name) { $script:Ui[$name] = $page.FindName($name) }
+    }
+    $script:Ui.VersionText.Text = "v$Version"
+    New-Tiles
+
+    $script:Ui.PauseButton.Add_Click({
+        Invoke-UiSafely {
+            $script:State.UserPaused = -not $script:State.UserPaused
+            Update-Paused
+            $script:Ui.PauseButton.Content = if ($script:State.UserPaused) { 'Resume' } else { 'Pause' }
+            Add-Event 'info' $(if ($script:State.UserPaused) { 'Live monitor paused.' } else { 'Live monitor resumed.' })
+            Update-Verdict
+        }
+    })
+    $script:Ui.BtnDetails.Add_Click({ Invoke-UiSafely { Start-Test 'Details' } })
+    $script:Ui.BtnDns.Add_Click({     Invoke-UiSafely { Start-Test 'Dns' } })
+    $script:Ui.BtnRoute.Add_Click({   Invoke-UiSafely { Start-Test 'Route' } })
+    $script:Ui.BtnLoad.Add_Click({    Invoke-UiSafely { Start-Test 'Load' } })
+    $script:Ui.GraphCanvas.Add_SizeChanged({ Invoke-UiSafely { Update-Graph } })
+    $page
+}
+
+function Start-Monitor {
+    # Finds the router and starts the live monitor (once)
+    if ($script:Shared) { return }
+    $connection = Get-ConnectionInfo
+    $script:Shared = New-SharedState $script:Targets $connection
+    Update-Paused
+    $script:State.Started = Get-Date
+    $script:State.BaselineErrors = Get-AdapterErrorCount $connection.InterfaceIndex
+    Update-Header
+
+    foreach ($loop in 'Invoke-PingLoop', 'Invoke-RegionLoop', 'Invoke-NetworkLoop') {
+        $script:State.Jobs += Start-Background -Root $script:Root -Command $loop -Arguments @{ Shared = $script:Shared }
+    }
+    if ($connection.Found) {
+        Add-Event 'info' "Live monitor started. Router $($connection.Gateway) found."
+    } else {
+        Add-Event 'bad' 'Live monitor started, but no router was found - is the network connected?'
+    }
+
+    $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:Timer.Interval = [TimeSpan]::FromSeconds(1)
+    $script:Timer.Add_Tick({ Invoke-UiSafely { Invoke-Tick } })
+    $script:Timer.Start()
+}
+
+function Suspend-Monitor {
+    # Krimz's Toolkit: another tab was selected. Measuring stops; a running test carries on.
+    if (-not $script:Shared -or $script:State.TabAway) { return }
+    $script:State.TabAway = $true
+    Update-Paused
+    if (-not $script:State.UserPaused) { Add-Event 'info' 'Live monitor paused while another tab is open.' }
+}
+
+function Resume-Monitor {
+    # Krimz's Toolkit: the tab was selected again. Old numbers are stale, so the verdict starts over.
+    if (-not $script:Shared) { Start-Monitor; return }
+    if (-not $script:State.TabAway) { return }
+    $script:State.TabAway = $false
+    Update-Paused
+    if (-not $script:State.UserPaused) {
+        $script:State.Started = Get-Date
+        $script:State.Verdict = $null
+        $script:State.PendingVerdict = $null
+        Add-Event 'info' 'Live monitor resumed.'
+    }
+    Invoke-UiSafely { Invoke-Tick }
+}
+
+function Show-DoctorWindow {
+    # The standalone window: the monitor starts straight away.
+    # -NoShow builds and starts everything without opening the window (used for automated checks)
+    param([string]$Root, [string]$Version, $Targets, [switch]$NoShow)
 
     Enable-DpiAwareness
+    # The shared look (Theme.xaml) becomes the application's resources. Krimz's Toolkit does this itself.
+    [xml]$themeXaml = Get-Content (Join-Path $Root 'ui\Theme.xaml') -Raw -Encoding UTF8
+    $app = [System.Windows.Application]::Current
+    if (-not $app) { $app = New-Object System.Windows.Application }
+    $app.ShutdownMode = 'OnExplicitShutdown'
+    $app.Resources = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $themeXaml))
+
     [xml]$xaml = Get-Content (Join-Path $Root 'ui\MainWindow.xaml') -Raw -Encoding UTF8
     $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
     $script:Ui.Window = $window
-    $xaml.SelectNodes('//*[@*[local-name()="Name"]]') | ForEach-Object {
-        $name = $_.GetAttribute('Name', 'http://schemas.microsoft.com/winfx/2006/xaml')
-        if ($name) { $script:Ui[$name] = $window.FindName($name) }
-    }
-    $script:Ui.VersionText.Text = "v$Version"
+    $window.Content = New-DoctorPage -Root $Root -Version $Version -Targets $Targets
 
     # Dark title bar to match the window (Windows 10 2004+ / Windows 11)
     $window.Add_SourceInitialized({
@@ -618,42 +728,7 @@ function Show-DoctorWindow {
         } catch { }
     })
 
-    New-Tiles
-    $connection = Get-ConnectionInfo
-    $script:Shared = New-SharedState $Targets $connection
-    $script:State.Started = Get-Date
-    $script:State.BaselineErrors = Get-AdapterErrorCount $connection.InterfaceIndex
-    Update-Header
-
-    # The live monitor starts straight away
-    foreach ($loop in 'Invoke-PingLoop', 'Invoke-RegionLoop', 'Invoke-NetworkLoop') {
-        $script:State.Jobs += Start-Background -Root $Root -Command $loop -Arguments @{ Shared = $script:Shared }
-    }
-    if ($connection.Found) {
-        Add-Event 'info' "Live monitor started. Router $($connection.Gateway) found."
-    } else {
-        Add-Event 'bad' 'Live monitor started, but no router was found - is the network connected?'
-    }
-
-    $script:Ui.PauseButton.Add_Click({
-        Invoke-UiSafely {
-            $script:Shared.Paused = -not $script:Shared.Paused
-            $script:Ui.PauseButton.Content = if ($script:Shared.Paused) { 'Resume' } else { 'Pause' }
-            Add-Event 'info' $(if ($script:Shared.Paused) { 'Live monitor paused.' } else { 'Live monitor resumed.' })
-            Update-Verdict
-        }
-    })
-    $script:Ui.BtnDetails.Add_Click({ Invoke-UiSafely { Start-Test 'Details' } })
-    $script:Ui.BtnDns.Add_Click({     Invoke-UiSafely { Start-Test 'Dns' } })
-    $script:Ui.BtnRoute.Add_Click({   Invoke-UiSafely { Start-Test 'Route' } })
-    $script:Ui.BtnLoad.Add_Click({    Invoke-UiSafely { Start-Test 'Load' } })
-    $script:Ui.GraphCanvas.Add_SizeChanged({ Invoke-UiSafely { Update-Graph } })
-
-    $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:Timer.Interval = [TimeSpan]::FromSeconds(1)
-    $script:Timer.Add_Tick({ Invoke-UiSafely { Invoke-Tick } })
-    $script:Timer.Start()
-
+    Start-Monitor
     $window.Add_Closed({ Stop-Everything })
 
     if ($NoShow) { return $window }
