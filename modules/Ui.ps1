@@ -23,7 +23,6 @@ $script:State = @{
     LastEvent = @{}; RegionFails = @{}; RegionVia = @{}
     Verdict = $null; PendingVerdict = $null; LastWifi = $null; BaselineErrors = $null
     UserPaused = $false   # the Pause button
-    TabAway = $false      # Krimz's Toolkit: another tab is selected
     OnBusy = $null        # Krimz's Toolkit: shows the working dot while a test runs
 }
 
@@ -587,8 +586,6 @@ function New-ResultCard {
 function Invoke-Tick {
     $script:State.Tick++
     Receive-Measurements
-    # Another tab is selected in Krimz's Toolkit: nothing is measured, only a running test is followed
-    if ($script:State.TabAway) { Update-Test; return }
     Update-Stats
     Update-Tiles
     Update-Header
@@ -599,8 +596,8 @@ function Invoke-Tick {
 }
 
 function Update-Paused {
-    # The monitor measures unless the Pause button or another toolkit tab stops it
-    $script:Shared.Paused = $script:State.UserPaused -or $script:State.TabAway
+    # The monitor measures unless the Pause button stops it
+    $script:Shared.Paused = $script:State.UserPaused
 }
 
 function Stop-Everything {
@@ -675,29 +672,6 @@ function Start-Monitor {
     $script:Timer.Interval = [TimeSpan]::FromSeconds(1)
     $script:Timer.Add_Tick({ Invoke-UiSafely { Invoke-Tick } })
     $script:Timer.Start()
-}
-
-function Suspend-Monitor {
-    # Krimz's Toolkit: another tab was selected. Measuring stops; a running test carries on.
-    if (-not $script:Shared -or $script:State.TabAway) { return }
-    $script:State.TabAway = $true
-    Update-Paused
-    if (-not $script:State.UserPaused) { Add-Event 'info' 'Live monitor paused while another tab is open.' }
-}
-
-function Resume-Monitor {
-    # Krimz's Toolkit: the tab was selected again. Old numbers are stale, so the verdict starts over.
-    if (-not $script:Shared) { Start-Monitor; return }
-    if (-not $script:State.TabAway) { return }
-    $script:State.TabAway = $false
-    Update-Paused
-    if (-not $script:State.UserPaused) {
-        $script:State.Started = Get-Date
-        $script:State.Verdict = $null
-        $script:State.PendingVerdict = $null
-        Add-Event 'info' 'Live monitor resumed.'
-    }
-    Invoke-UiSafely { Invoke-Tick }
 }
 
 function Show-DoctorWindow {
