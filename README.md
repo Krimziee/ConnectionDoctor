@@ -10,10 +10,9 @@ No admin rights needed.
 
 Double-click **`Connection Doctor.cmd`**. The live monitor starts straight away.
 
-It's also a tab in **Krimz's Toolkit**. There, the live monitor only measures while its tab is selected:
-it starts the first time you open the tab, pauses when you switch to another tab, and resumes
-(with a fresh 30-second "Measuring...") when you come back. A test that's running carries on in the
-background, and the tab shows a small dot until it's done.
+It's also a tab in **Krimz's Toolkit**. There, the live monitor starts when the toolkit opens and keeps
+measuring whichever tab you're on, so the numbers are ready when you look. A test that's running carries
+on in the background too, and the tab shows a small dot until it's done.
 
 ## What you see
 
