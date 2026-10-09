@@ -590,7 +590,8 @@ function Invoke-Tick {
     Update-Tiles
     Update-Header
     Update-Wifi
-    Update-Graph
+    # The graph is only drawing (the slowest part); in Krimz's Toolkit it waits while another tab is shown
+    if ($script:Ui.Page.IsVisible) { Update-Graph }
     Update-Verdict
     Update-Test
 }
@@ -646,6 +647,8 @@ function New-DoctorPage {
     $script:Ui.BtnRoute.Add_Click({   Invoke-UiSafely { Start-Test 'Route' } })
     $script:Ui.BtnLoad.Add_Click({    Invoke-UiSafely { Start-Test 'Load' } })
     $script:Ui.GraphCanvas.Add_SizeChanged({ Invoke-UiSafely { Update-Graph } })
+    # Shown again (toolkit tab selected): draw the graph straight away instead of on the next tick
+    $page.Add_IsVisibleChanged({ if ($this.IsVisible -and $script:Shared) { Invoke-UiSafely { Update-Graph } } })
     $page
 }
 
