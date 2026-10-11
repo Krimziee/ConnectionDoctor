@@ -653,13 +653,15 @@ function New-DoctorPage {
 }
 
 function Start-Monitor {
-    # Finds the router and starts the live monitor (once)
+    # Finds the router and starts the live monitor (once). Krimz's Toolkit reads the router
+    # in the background while its window opens and passes the result in.
+    param($Connection, $BaselineErrors)
     if ($script:Shared) { return }
-    $connection = Get-ConnectionInfo
+    $connection = if ($Connection) { $Connection } else { Get-ConnectionInfo }
     $script:Shared = New-SharedState $script:Targets $connection
     Update-Paused
     $script:State.Started = Get-Date
-    $script:State.BaselineErrors = Get-AdapterErrorCount $connection.InterfaceIndex
+    $script:State.BaselineErrors = if ($PSBoundParameters.ContainsKey('BaselineErrors')) { $BaselineErrors } else { Get-AdapterErrorCount $connection.InterfaceIndex }
     Update-Header
 
     foreach ($loop in 'Invoke-PingLoop', 'Invoke-RegionLoop', 'Invoke-NetworkLoop') {
