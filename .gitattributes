@@ -4,3 +4,6 @@
 *.md   text eol=crlf
 *.psd1 text eol=crlf
 *.xaml text eol=crlf
+
+# README pictures, not needed in a download
+screenshots/ export-ignore

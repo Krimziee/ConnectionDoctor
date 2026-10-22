@@ -6,6 +6,12 @@ your Wi-Fi or cable, your ISP, or the route to the game servers.
 **It makes no changes to your PC.** It only measures. Fixes are shown as text for you to do yourself.
 No admin rights needed.
 
+## What it looks like
+
+![Connection Doctor](screenshots/connection-doctor.png)
+
+Shown inside Krimz's Toolkit, where it is a tab.
+
 ## Start it
 
 Double-click **`Connection Doctor.cmd`**. The live monitor starts straight away.
