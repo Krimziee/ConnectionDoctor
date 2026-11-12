@@ -449,6 +449,13 @@ function Receive-Measurements {
 
     $sample = $null
     while ($script:Shared.RegionSamples.TryDequeue([ref]$sample)) {
+        # Measured through a different test point than before (AWS <-> Steam): the two have different
+        # normal pings, so mixing them would look like jitter. Start this region's numbers afresh.
+        $before = $script:State.RegionVia[$sample.Key]
+        if ($before -and $sample.Via -and $sample.Via -ne $before -and $script:State.History[$sample.Key]) {
+            $script:State.History[$sample.Key].Clear()
+        }
+        if ($sample.Via) { $script:State.RegionVia[$sample.Key] = $sample.Via }
         Add-Sample $sample.Key $sample.Time $sample.Ms
         $name = ($script:Series | Where-Object { $_.Key -eq $sample.Key }).Name
         if ($null -eq $sample.Ms) {
@@ -457,7 +464,6 @@ function Receive-Measurements {
         } else {
             if ([int]$script:State.RegionFails[$sample.Key] -ge 2) { Add-Event 'info' "$name is answering again." }
             $script:State.RegionFails[$sample.Key] = 0
-            $script:State.RegionVia[$sample.Key] = $sample.Via
         }
     }
 

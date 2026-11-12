@@ -106,7 +106,13 @@ function Invoke-RegionLoop {
     $regions  = $Shared.Targets.Regions
     $steam    = Get-SteamRelays $Shared.Targets
     $addresses = @{}; $resolvedAt = [datetime]::MinValue
-    $usingSteam = @{}
+    # Each region is measured through ONE test point at a time, so its numbers stay comparable
+    # (the two have different normal pings): the AWS endpoint normally, Steam's relay only after
+    # AWS failed 3 times in a row. While on Steam, AWS is tried again once a minute and takes
+    # over after 3 answers in a row. The window starts a region's numbers afresh on a switch.
+    $source = @{}; $awsFails = @{}; $awsOk = @{}
+    foreach ($r in $regions) { $source[$r.Key] = 'AWS'; $awsFails[$r.Key] = 0; $awsOk[$r.Key] = 0 }
+    $round = 0
 
     while (-not $Shared.Stop) {
         $roundStart = [Diagnostics.Stopwatch]::StartNew()
@@ -117,21 +123,38 @@ function Invoke-RegionLoop {
                     try { $addresses[$r.Key] = [Net.Dns]::GetHostAddresses($r.Host) | Where-Object AddressFamily -eq 'InterNetwork' | Select-Object -First 1 }
                     catch { }
                 }
+                # The relay list is read when the monitor starts; if that failed (offline), try again now
+                if ($steam.Count -eq 0) { $steam = Get-SteamRelays $Shared.Targets }
                 $resolvedAt = Get-Date
             }
 
+            $round++
             foreach ($r in $regions) {
-                $ms = $null; $via = 'AWS'
-                if ($addresses[$r.Key]) { $ms = Measure-TcpConnect $addresses[$r.Key] $r.Port }
-                if ($null -eq $ms -and $steam[$r.Key]) {
-                    $ms = Measure-Ping $steam[$r.Key] 1500
-                    $via = 'Steam'
+                $key = $r.Key; $ms = $null
+                if ($source[$key] -eq 'AWS') {
+                    if ($addresses[$key]) { $ms = Measure-TcpConnect $addresses[$key] $r.Port }
+                    if ($null -ne $ms) {
+                        $awsFails[$key] = 0
+                    } else {
+                        $awsFails[$key]++
+                        if ($awsFails[$key] -ge 3 -and $steam[$key]) {
+                            $source[$key] = 'Steam'; $awsOk[$key] = 0
+                            $Shared.Notes.Enqueue(@{ Level = 'info'; Text = "$($r.Name): the AWS test point stopped answering, now measuring via Steam's relay instead." })
+                            $ms = Measure-Ping $steam[$key] 1500
+                        }
+                    }
+                } else {
+                    $ms = Measure-Ping $steam[$key] 1500
+                    # Once a minute: is the AWS test point back?
+                    if ($round % 12 -eq 0 -and $addresses[$key]) {
+                        if ($null -ne (Measure-TcpConnect $addresses[$key] $r.Port)) { $awsOk[$key]++ } else { $awsOk[$key] = 0 }
+                        if ($awsOk[$key] -ge 3) {
+                            $source[$key] = 'AWS'; $awsFails[$key] = 0
+                            $Shared.Notes.Enqueue(@{ Level = 'info'; Text = "$($r.Name): the AWS test point answers again, measuring through it as before." })
+                        }
+                    }
                 }
-                if ($null -ne $ms -and $via -eq 'Steam' -and -not $usingSteam[$r.Key]) {
-                    $Shared.Notes.Enqueue(@{ Level = 'info'; Text = "$($r.Name): the AWS test point didn't answer, now measuring via Steam's relay instead." })
-                }
-                if ($null -ne $ms) { $usingSteam[$r.Key] = ($via -eq 'Steam') }
-                $Shared.RegionSamples.Enqueue([pscustomobject]@{ Time = Get-Date; Key = $r.Key; Ms = $ms; Via = $via })
+                $Shared.RegionSamples.Enqueue([pscustomobject]@{ Time = Get-Date; Key = $key; Ms = $ms; Via = $source[$key] })
             }
         }
         $wait = 5000 - $roundStart.ElapsedMilliseconds

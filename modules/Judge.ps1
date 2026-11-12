@@ -86,6 +86,11 @@ function Get-Verdict {
                   Detail = 'Nothing past this point can work. Check the cable or Wi-Fi connection, or restart the router.' }
     }
     if ($internetDead.Count -eq $InternetKeys.Count) {
+        $routerAnswers = $HasRouter -and $Stats.Router -and $Stats.Router.Count -gt 0 -and $Stats.Router.LossPct -lt 100
+        if (-not $routerAnswers) {
+            return @{ Key = 'nonetwork'; Level = 'bad'; Title = 'No connection: no router was found and nothing answers'
+                      Detail = 'This PC has no working network connection. Check that the cable is plugged in or Wi-Fi is connected, then restart the router.' }
+        }
         return @{ Key = 'nointernet'; Level = 'bad'; Title = 'No internet: your router answers, but nothing beyond it does'
                   Detail = 'Your home network is fine. The router has lost its internet connection - restart the router, or check for an outage with your ISP.' }
     }
@@ -99,7 +104,7 @@ function Get-Verdict {
     # 2. Two or more internet targets
     if ($internetBad.Count -ge 2) {
         return @{ Key = 'isp'; Level = 'bad'; Title = 'Your ISP or line is having problems'
-                  Detail = "Your router is fine, but $($internetBad.Count) of 3 internet targets are unstable at the same time. That points past your home: the line or your ISP. If it keeps happening, the Route Check gives details to show your ISP." }
+                  Detail = "Your router is fine, but $($internetBad.Count) of $($InternetKeys.Count) internet targets are unstable at the same time. That points past your home: the line or your ISP. If it keeps happening, the Route Check gives details to show your ISP." }
     }
 
     $regionBad = @($Regions | Where-Object { $Status[$_.Key] -eq 'bad' } | ForEach-Object { $_.Name })
@@ -161,7 +166,7 @@ function Get-RoundEvent {
         return @{ Type = 'router'; Level = 'warn'; Text = "Your router itself answered slowly ($r) -> $place hiccup." }
     }
     if ($spiked.Count -ge 2) {
-        return @{ Type = 'isp'; Level = 'bad'; Text = "$what on $($spiked.Count) of 3 internet targets, router fine -> beyond your home (ISP or line)." }
+        return @{ Type = 'isp'; Level = 'bad'; Text = "$what on $($spiked.Count) of $($InternetKeys.Count) internet targets, router fine -> beyond your home (ISP or line)." }
     }
     $null
 }

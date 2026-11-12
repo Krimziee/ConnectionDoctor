@@ -15,7 +15,8 @@ function New-TestResult {
 
 function Get-Median {
     param([double[]]$Values)
-    if (-not $Values -or $Values.Count -eq 0) { return $null }
+    # ($null check, not "-not": an array holding a single 0 counts as false)
+    if ($null -eq $Values -or $Values.Count -eq 0) { return $null }
     $sorted = @($Values | Sort-Object)
     $sorted[[int][Math]::Floor(($sorted.Count - 1) / 2)]
 }
