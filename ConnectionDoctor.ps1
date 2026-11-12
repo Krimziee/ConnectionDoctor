@@ -13,7 +13,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '0.1.0'
+$script:Version = '0.1.1'
 
 try {
     foreach ($module in 'Network', 'Monitor', 'Judge', 'Tests', 'Ui') {
