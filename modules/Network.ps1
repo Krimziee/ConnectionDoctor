@@ -4,6 +4,24 @@
     Also loaded inside the background measuring threads.
 #>
 
+# Windows' network classes are read directly. Get-NetRoute, Get-NetAdapter and the other
+# network cmdlets load modules that take over a second and about 25 MB of memory per thread.
+function Get-NetClass {
+    param([string]$Class, [string]$Filter)
+    @(Get-CimInstance -Namespace 'root\StandardCimv2' -ClassName $Class -Filter $Filter -ErrorAction SilentlyContinue)
+}
+
+function ConvertTo-WqlText {
+    # Adapter names are chosen by the user and can contain quotes or backslashes
+    param([string]$Text)
+    $Text -replace '\\', '\\' -replace "'", "\'"
+}
+
+function Get-DnsServers {
+    param([int]$InterfaceIndex)
+    @(Get-NetClass MSFT_DNSClientServerAddress "InterfaceIndex=$InterfaceIndex AND AddressFamily=2" | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ })
+}
+
 function Get-ConnectionInfo {
     # The adapter and router that internet traffic actually leaves through.
     # VPN tunnels add default routes without a real next hop, so those are skipped
@@ -13,31 +31,41 @@ function Get-ConnectionInfo {
         IsWifi = $false; LinkSpeedBps = 0; IPv4 = $null; DnsServers = @(); TrafficAdapter = $null; TrafficDns = @()
     }
 
-    $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+    $metric = @{}
+    foreach ($i in Get-NetClass MSFT_NetIPInterface 'AddressFamily=2') { $metric[[int]$i.InterfaceIndex] = [int]$i.InterfaceMetric }
+    $route = Get-NetClass MSFT_NetRoute "DestinationPrefix='0.0.0.0/0'" |
         Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } |
-        Sort-Object { $_.RouteMetric + (Get-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric } |
+        Sort-Object { $_.RouteMetric + $metric[[int]$_.InterfaceIndex] } |
         Select-Object -First 1
     if (-not $route) { return [pscustomobject]$info }
 
-    $adapter = Get-NetAdapter -InterfaceIndex $route.ifIndex -ErrorAction SilentlyContinue
+    $index = [int]$route.InterfaceIndex
+    $adapter = Get-NetClass MSFT_NetAdapter "InterfaceIndex=$index" | Select-Object -First 1
     $info.Found          = $true
     $info.Gateway        = $route.NextHop
-    $info.InterfaceIndex = $route.ifIndex
+    $info.InterfaceIndex = $index
     if ($adapter) {
         $info.AdapterName  = $adapter.Name
         $info.Description  = $adapter.InterfaceDescription
-        $info.IsWifi       = $adapter.PhysicalMediaType -match '802\.11' -or $adapter.NdisPhysicalMedium -eq 9
+        $info.IsWifi       = $adapter.NdisPhysicalMedium -eq 9   # Native 802.11
         $info.LinkSpeedBps = [double]$adapter.ReceiveLinkSpeed
     }
-    $info.IPv4 = (Get-NetIPAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-    $info.DnsServers = @((Get-DnsClientServerAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+    $info.IPv4 = (Get-NetClass MSFT_NetIPAddress "InterfaceIndex=$index AND AddressFamily=2" | Select-Object -First 1).IPAddress
+    $info.DnsServers = @(Get-DnsServers $index)
 
-    # Where traffic to the internet really goes (differs from the router's adapter when a VPN is carrying it)
-    $traffic = Find-NetRoute -RemoteIPAddress '1.1.1.1' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($traffic -and $traffic.InterfaceIndex -ne $route.ifIndex) {
-        $info.TrafficAdapter = (Get-NetAdapter -InterfaceIndex $traffic.InterfaceIndex -ErrorAction SilentlyContinue).Name
-        $info.TrafficDns     = @((Get-DnsClientServerAddress -InterfaceIndex $traffic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
-    }
+    # Where traffic to the internet really goes (differs from the router's adapter when a VPN is carrying it).
+    # Windows picks the source address for 1.1.1.1; a UDP "connect" only does that lookup and sends nothing.
+    try {
+        $udp = New-Object Net.Sockets.Socket ([Net.Sockets.AddressFamily]::InterNetwork), ([Net.Sockets.SocketType]::Dgram), ([Net.Sockets.ProtocolType]::Udp)
+        try { $udp.Connect('1.1.1.1', 53); $source = $udp.LocalEndPoint.Address.ToString() } finally { $udp.Dispose() }
+        $traffic = [int](Get-NetClass MSFT_NetIPAddress "IPAddress='$source'" | Select-Object -First 1).InterfaceIndex
+        if ($traffic -and $traffic -ne $index) {
+            $name = (Get-NetClass MSFT_NetAdapter "InterfaceIndex=$traffic" | Select-Object -First 1).Name
+            if (-not $name) { $name = (Get-NetClass MSFT_NetIPInterface "InterfaceIndex=$traffic AND AddressFamily=2" | Select-Object -First 1).InterfaceAlias }
+            $info.TrafficAdapter = $name
+            $info.TrafficDns     = @(Get-DnsServers $traffic)
+        }
+    } catch { }   # no route to the internet: nothing to add
     [pscustomobject]$info
 }
 
@@ -82,7 +110,7 @@ function Get-AdapterSpeedInfo {
     $result = [ordered]@{ MaxBps = 0; SpeedSetting = $null; PowerSaving = @() }
     if (-not $AdapterName) { return [pscustomobject]$result }
 
-    $props = @(Get-NetAdapterAdvancedProperty -Name $AdapterName -ErrorAction SilentlyContinue)
+    $props = Get-NetClass MSFT_NetAdapterAdvancedPropertySettingData "Name='$(ConvertTo-WqlText $AdapterName)'"
     $speed = $props | Where-Object RegistryKeyword -eq '*SpeedDuplex' | Select-Object -First 1
     if ($speed) {
         $result.SpeedSetting = $speed.DisplayValue
@@ -102,9 +130,9 @@ function Get-AdapterSpeedInfo {
 function Get-AdapterErrorCount {
     param($InterfaceIndex)
     if (-not $InterfaceIndex) { return $null }
-    $adapter = Get-NetAdapter -InterfaceIndex $InterfaceIndex -ErrorAction SilentlyContinue
+    $adapter = Get-NetClass MSFT_NetAdapter "InterfaceIndex=$([int]$InterfaceIndex)" | Select-Object -First 1
     if (-not $adapter) { return $null }
-    $s = Get-NetAdapterStatistics -Name $adapter.Name -ErrorAction SilentlyContinue
+    $s = Get-NetClass MSFT_NetAdapterStatisticsSettingData "Name='$(ConvertTo-WqlText $adapter.Name)'" | Select-Object -First 1
     if (-not $s) { return $null }
     [double]($s.ReceivedPacketErrors + $s.ReceivedDiscardedPackets + $s.OutboundPacketErrors + $s.OutboundDiscardedPackets)
 }

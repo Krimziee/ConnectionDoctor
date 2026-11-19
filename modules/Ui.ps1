@@ -6,7 +6,8 @@
     asks modules\Judge.ps1 for a verdict. Tests run on their own thread.
     The page (ui\Page.xaml) is shown by the standalone window and by the
     Connection Doctor tab in Krimz's Toolkit (modules\Page.ps1). In the toolkit
-    the monitor only measures while its tab is selected.
+    the monitor keeps measuring on every tab; only the graph drawing waits
+    while another tab is shown.
 #>
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -95,7 +96,9 @@ function New-Dot {
 
 function Get-PlanMbps {
     $value = 0.0
-    $text = ($script:Ui.PlanBox.Text -replace ',', '.').Trim()
+    $text = ($script:Ui.PlanBox.Text -replace '\s', '')
+    # "1,000" is a thousands separator; "2,5" is a decimal comma
+    $text = if ($text -match '^\d{1,3}(,\d{3})+$') { $text -replace ',', '' } else { $text -replace ',', '.' }
     if ([double]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -and $value -gt 0) { return $value }
     0.0
 }
@@ -373,7 +376,11 @@ function Update-Verdict {
         Set-Verdict @{ Level = 'none'; Title = 'Measuring...'; Detail = ('First verdict in {0:0} seconds. It updates every 10 seconds after that, and only changes once a new pattern holds.' -f (30 - $elapsed)) }
         return
     }
-    if ($script:State.Tick % 10 -ne 0 -and $script:State.Verdict) { return }
+    if ($script:State.Tick % 10 -ne 0 -and $script:State.Verdict) {
+        # Put the last verdict back straight away (it replaces "Paused" right after Resume)
+        Set-Verdict $script:State.Verdict
+        return
+    }
 
     $internetKeys = @($script:Targets.Internet | ForEach-Object { $_.Key })
     $names = @{}; foreach ($s in $script:Series) { $names[$s.Key] = $s.Name }
@@ -507,16 +514,21 @@ function Start-Test {
         'Load'    { @{ Shared = $script:Shared; Root = $script:Root; Targets = $script:Targets; PlanMbps = $plan } }
     }
 
+    # Started before the window changes, so a failed start leaves the buttons as they were
+    $job = Start-Background -Root $script:Root -Command $def.Command -Arguments $arguments
+
     Set-TestButtons $false
     $script:Ui.ResultsHint.Visibility = 'Collapsed'
     $running = New-Text "$($def.Name) - running..." $script:LevelColors.info 13 'SemiBold' '0,0,0,10'
     $script:Ui.ResultsPanel.Children.Insert(0, $running)
 
+    # Shaded test periods older than the 10-minute history are never drawn again
+    $cutoff = (Get-Date).AddMinutes(-10)
+    [void]$script:State.Spans.RemoveAll([Predicate[object]]{ param($s) $s.End -and $s.End -lt $cutoff }.GetNewClosure())
     $span = [pscustomobject]@{ Name = $def.Name; Start = Get-Date; End = $null }
     $script:State.Spans.Add($span)
     $script:State.Test = @{
-        Id = $Id; Name = $def.Name; Started = Get-Date; Span = $span; Running = $running
-        Job = Start-Background -Root $script:Root -Command $def.Command -Arguments $arguments
+        Id = $Id; Name = $def.Name; Started = Get-Date; Span = $span; Running = $running; Job = $job
     }
     Add-Event 'info' "Started $($def.Name)."
     Set-DoctorBusy $true
@@ -613,7 +625,8 @@ function Stop-Everything {
     if ($script:Timer) { $script:Timer.Stop() }
     try { if ($script:Shared.TestProcess -and -not $script:Shared.TestProcess.HasExited) { $script:Shared.TestProcess.Kill() } } catch { }
     foreach ($job in $script:State.Jobs) { Stop-Background $job }
-    if ($script:State.Test) { Stop-Background $script:State.Test.Job }
+    if ($script:State.Test) { Stop-Background $script:State.Test.Job; $script:State.Test = $null }
+    Set-DoctorBusy $false
 }
 
 function New-DoctorPage {
@@ -641,6 +654,7 @@ function New-DoctorPage {
 
     $script:Ui.PauseButton.Add_Click({
         Invoke-UiSafely {
+            if (-not $script:Shared) { return }   # the monitor hasn't started yet
             $script:State.UserPaused = -not $script:State.UserPaused
             Update-Paused
             $script:Ui.PauseButton.Content = if ($script:State.UserPaused) { 'Resume' } else { 'Pause' }
